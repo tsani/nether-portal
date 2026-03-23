@@ -1,93 +1,9 @@
-import logging
-import os
-import subprocess
-from flask import Flask, request, jsonify
-import requests
 from dataclasses import dataclass
 from enum import StrEnum, auto
 from functools import cached_property
 from datetime import datetime
 
-app = Flask(__name__)
-
-OBSIDIAN_WORKOUT_DIR = os.environ['OBSIDIAN_WORKOUT_DIR']
-HEVY_WEBHOOK_SECRET = os.environ['HEVY_WEBHOOK_SECRET']
-HEVY_API_KEY = os.environ['HEVY_API_KEY']
-
-HEVY_API_BASE = 'https://api.hevyapp.com/v1'
-
 KG_TO_LBS = 2.20462
-
-def parse_hevy_workout(hw) -> Workout:
-    start_time = datetime.fromisoformat(hw['start_time'])
-    end_time = datetime.fromisoformat(hw['end_time'])
-    duration = int((end_time - start_time).total_seconds())
-
-    exercises = {}
-    for ex in hw['exercises']:
-        name = ex['title']
-        sets = []
-        for s in ex['sets']:
-            weight_kg = s['weight_kg']
-            weight_lbs = round(weight_kg * KG_TO_LBS) if weight_kg else None
-            data = make_set_data(
-                rep_count=s['reps'],
-                weight_lbs=weight_lbs,
-                duration_sec=s['duration_seconds'],
-            )
-            sets.append(Set(data=data, kind=SetKind(s['type'])))
-        exercises[name] = Exercise(name=name, sets=sets)
-
-    return Workout(
-        title=hw['title'],
-        start_time=start_time,
-        duration=duration,
-        exercises=exercises,
-        description=hw['description'],
-    )
-
-def record_workout(workout):
-    if os.path.exists(os.path.join(OBSIDIAN_WORKOUT_DIR, workout.filename)):
-        logging.info("Refusing to add duplicate workout.")
-        return # skip duplicate workouts!
-
-    subprocess.run(['git', '-C', OBSIDIAN_WORKOUT_DIR, 'pull', '--rebase'], check=True)
-
-    path = os.path.join(OBSIDIAN_WORKOUT_DIR, workout.filename)
-    with open(path, 'w') as f:
-        f.write(workout.note_format)
-
-    subprocess.run(['git', '-C', OBSIDIAN_WORKOUT_DIR, 'add', workout.filename], check=True)
-    subprocess.run(
-        ['git', '-C', OBSIDIAN_WORKOUT_DIR, 'commit', '-m', f'hevy: {workout.title}'],
-        check=True,
-    )
-    subprocess.run(['git', '-C', OBSIDIAN_WORKOUT_DIR, 'push'], check=True)
-
-@app.post('/hevy')
-def hevy():
-    logging.info('hevy webhook: headers=%s', dict(request.headers))
-
-    if request.headers.get('Authorization') != HEVY_WEBHOOK_SECRET:
-        return jsonify({'error': 'unauthorized'}), 401
-
-    body = request.get_json(force=True)
-    logging.info('hevy webhook: body=%s', body)
-    workout_id = body['workoutId']
-
-    resp = requests.get(
-        f'{HEVY_API_BASE}/workouts/{workout_id}',
-        headers={'api-key': HEVY_API_KEY},
-    )
-    if resp.status_code == 404:
-        logging.info('hevy webhook: workout %s not found (non-creation event?), ignoring', workout_id)
-        return jsonify({}), 200
-    resp.raise_for_status()
-
-    workout = parse_hevy_workout(resp.json())
-    record_workout(workout)
-
-    return jsonify({}), 200
 
 @dataclass
 class RepsAndWeightSet:
@@ -149,7 +65,7 @@ class Set:
         return f'{str(self.data)}' \
             + ('' if self.kind == 'normal' else f' ({self.kind})')
 
-def make_set_data(rep_count=None, weight_lbs=None, duration_sec=None) -> Set:
+def make_set_data(rep_count=None, weight_lbs=None, duration_sec=None) -> SetData:
     if rep_count is not None:
         if weight_lbs is not None:
             return RepsAndWeightSet(rep_count=rep_count, weight_lbs=weight_lbs)
@@ -163,7 +79,7 @@ def make_set_data(rep_count=None, weight_lbs=None, duration_sec=None) -> Set:
     elif duration_sec is not None:
         return DurationOnlySet(duration_sec=duration_sec)
     else:
-        assert false, 'weight-only sets do not exist'
+        assert False, 'weight-only sets do not exist'
 
 @dataclass
 class Exercise:
@@ -217,6 +133,3 @@ volume: {self.volume}
     @property
     def filename(self):
         return f'{self.date_str} - {self.title} ({self.volume} lbs).md'
-
-if __name__ == '__main__':
-    app.run(debug=True, port=5000)
