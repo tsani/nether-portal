@@ -1,0 +1,4 @@
+#!/bin/bash
+
+source <(sed 's/.*/export \0/' .env)
+.venv/bin/python nether_portal.py
