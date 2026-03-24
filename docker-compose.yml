@@ -1,0 +1,10 @@
+services:
+  nether-portal:
+    build: .
+    ports:
+      - "5000:5000"
+    env_file: .env
+    environment:
+      OBSIDIAN_WORKOUT_DIR: /vault/workouts
+    volumes:
+      - ${OBSIDIAN_VAULT_PATH}:/vault
