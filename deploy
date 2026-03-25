@@ -1,0 +1,13 @@
+#!/bin/bash
+set -e
+
+./build
+docker push jerrington/nether-portal:latest
+ssh j <<EOF
+set -e
+cd /site/nether-portal
+docker-compose down
+sleep 5
+docker pull jerrington/nether-portal:latest
+docker-compose up -d
+EOF
