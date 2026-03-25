@@ -1,7 +1,7 @@
 #!/bin/bash
 set -e
 
-export GIT_SSH_COMMMAND="ssh -o StrictHostKeyChecking=accept-new"
+export GIT_SSH_COMMAND="ssh -o StrictHostKeyChecking=accept-new"
 if [ -z "$(ls /vault)" ] ; then
     git clone "$GIT_UPSTREAM" /vault
 fi
