@@ -125,6 +125,7 @@ topics:
   - "[[Gym]]"
 workout: {'' if 'workout' in self.title else f'"[[{self.title}]]"'}
 date: {self.date_str}
+daily_note: [[{self.date_str}]]
 volume: {self.volume}
 ---
 {'\n'.join(e.note_format for e in self.exercises.values())}

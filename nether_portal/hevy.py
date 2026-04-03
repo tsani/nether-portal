@@ -64,13 +64,10 @@ def record_workout(workout):
 
 @bp.post('/hevy')
 def hevy():
-    logging.info('hevy webhook: headers=%s', dict(request.headers))
-
     if request.headers.get('Authorization') != HEVY_WEBHOOK_SECRET:
         return jsonify({'error': 'unauthorized'}), 401
 
     body = request.get_json(force=True)
-    logging.info('hevy webhook: body=%s', body)
     workout_id = body['workoutId']
 
     resp = requests.get(
