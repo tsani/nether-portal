@@ -2,13 +2,25 @@ import logging
 import os
 import subprocess
 from datetime import datetime
+import sys
 
 from flask import Blueprint, request, jsonify
 import requests
 
 from .models import Exercise, KG_TO_LBS, Set, SetKind, Workout, make_set_data
 
-OBSIDIAN_WORKOUT_DIR = os.environ['OBSIDIAN_WORKOUT_DIR']
+def die(msg):
+    logging.error(msg)
+    sys.exit(1)
+
+OBSIDIAN_VAULT_PATH = os.environ['OBSIDIAN_VAULT_PATH']
+OBSIDIAN_WORKOUT_DIR = os.path.join(
+    OBSIDIAN_VAULT_PATH,
+    os.environ['OBSIDIAN_WORKOUT_DIR'],
+)
+os.path.exists(OBSIDIAN_WORKOUT_DIR) or \
+    die(f'no such file or directory: {OBSIDIAN_WORKOUT_DIR}')
+
 HEVY_WEBHOOK_SECRET = os.environ['HEVY_WEBHOOK_SECRET']
 HEVY_API_KEY = os.environ['HEVY_API_KEY']
 

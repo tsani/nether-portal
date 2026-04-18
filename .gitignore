@@ -1,3 +1,4 @@
 /.env
 /.claude
 /junk/
+/.secret.strava.json
