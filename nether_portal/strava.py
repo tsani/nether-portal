@@ -1,10 +1,14 @@
+import base64
 import json
 import logging
 import os
+import random
+import re
+import string
 import subprocess
 import threading
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import sys
 
 import requests
@@ -30,7 +34,57 @@ os.path.exists(OBSIDIAN_ACTIVITY_DIR) or \
 
 STRAVA_API_BASE = 'https://www.strava.com/api/v3'
 
+NP_USERNAME = os.environ.get('NP_USERNAME')
+NP_PASSWORD = os.environ.get('NP_PASSWORD')
+
+_cache: dict[str, dict] = {}  # npid -> {'id': int}
+
 bp = Blueprint('strava', __name__)
+
+def _check_auth() -> bool:
+    if NP_USERNAME is None or NP_PASSWORD is None:
+        return False
+    auth = request.headers.get('Authorization', '')
+    if not auth.startswith('Basic '):
+        return False
+    try:
+        decoded = base64.b64decode(auth[6:]).decode('utf-8')
+        user, pw = decoded.split(':', 1)
+        return user == NP_USERNAME and pw == NP_PASSWORD
+    except Exception:
+        return False
+
+def _wants_markdown() -> bool:
+    accept = request.headers.get('Accept', '')
+    return 'text/markdown' in accept or 'text/plain' in accept
+
+def _make_npid() -> str:
+    return ''.join(random.choices(string.ascii_lowercase, k=4))
+
+def _fetch_activities_for_date(date_str: str):
+    target_date = datetime.strptime(date_str, '%Y-%m-%d').date()
+    after = datetime(target_date.year, target_date.month, target_date.day, tzinfo=timezone.utc)
+    before = after + timedelta(days=1)
+    client = Client(access_token=_get_access_token())
+    return list(client.get_activities(after=after, before=before))
+
+def _activity_to_dict(npid: str, a) -> dict:
+    return {
+        'npid': npid,
+        'id': a.id,
+        'timestamp': a.start_date.isoformat(),
+        'elapsed_time': _fmt_seconds(int(a.elapsed_time)) if a.elapsed_time is not None else None,
+        'elapsed_time_sec': int(a.elapsed_time) if a.elapsed_time is not None else None,
+        'title': a.name,
+        'type': str(a.sport_type.root),
+        'distance_km': round(float(a.distance) / 1000, 2) if a.distance else None,
+        'moving_time': _fmt_seconds(int(a.moving_time)) if a.moving_time is not None else None,
+        'moving_time_sec': int(a.moving_time) if a.moving_time is not None else None,
+        'elevation_gain_m': round(float(a.total_elevation_gain), 0) if a.total_elevation_gain else None,
+        'average_speed_kmh': round(float(a.average_speed) * 3.6, 1) if a.average_speed else None,
+        'max_speed_kmh': round(float(a.max_speed) * 3.6, 1) if a.max_speed else None,
+        'pr_count': a.pr_count,
+    }
 
 # --- Token management ---
 
@@ -63,6 +117,11 @@ def _get_access_token() -> str:
 
 # --- Activity formatting ---
 
+def _to_local(dt: datetime) -> datetime:
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone()
+
 def _fmt_seconds(seconds: int) -> str:
     h, rem = divmod(seconds, 3600)
     m, s = divmod(rem, 60)
@@ -70,7 +129,7 @@ def _fmt_seconds(seconds: int) -> str:
 
 def _format_activity(a) -> str:
     """Format a stravalib DetailedActivity as an Obsidian markdown note."""
-    date_str = a.start_date.strftime('%Y-%m-%d')
+    date_str = _to_local(a.start_date).strftime('%Y-%m-%d')
     distance_km = a.distance / 1000
     avg_speed_kmh = a.average_speed * 3.6
     max_speed_kmh = a.max_speed * 3.6
@@ -82,18 +141,18 @@ def _format_activity(a) -> str:
         '  - "#activity"',
         'topics:',
         '  - "[[Strava]]"',
-        f'type: {a.type}',
+        f'type: "[[{a.sport_type.root}]]"',
         f'date: {date_str}',
         f'distance_km: {distance_km:.2f}',
+        f'moving_time_sec: {a.moving_time}',
+        f'elapsed_time_sec: {a.elapsed_time}',
+        f'moving_time: {_fmt_seconds(a.moving_time)}',
+        f'elapsed_time: {_fmt_seconds(a.elapsed_time)}',
+        f'elevation_gain_m: {a.total_elevation_gain:.0f}',
+        f'average_speed_kmh: {avg_speed_kmh:.1f}',
+        f'max_speed_kmh: {max_speed_kmh:.1f}',
+        f'personal_record_count: {a.pr_count}',
         '---',
-        '',
-        f'- **Distance:** {distance_km:.2f} km',
-        f'- **Moving Time:** {_fmt_seconds(a.moving_time)}',
-        f'- **Elapsed Time:** {_fmt_seconds(a.elapsed_time)}',
-        f'- **Elevation Gain:** {a.total_elevation_gain:.0f} m',
-        f'- **Average Speed:** {avg_speed_kmh:.1f} km/h',
-        f'- **Max Speed:** {max_speed_kmh:.1f} km/h',
-        f'- **PRs:** {a.pr_count}',
     ]
 
     if a.description:
@@ -102,7 +161,7 @@ def _format_activity(a) -> str:
     return '\n'.join(lines) + '\n'
 
 def _activity_filename(a) -> str:
-    return f'{a.start_date.strftime("%Y-%m-%d")} - {a.name}.md'
+    return f'{_to_local(a.start_date).strftime("%Y-%m-%d")} - {a.name}.md'
 
 def record_activity(a):
     filename = _activity_filename(a)
@@ -155,6 +214,70 @@ def _ensure_subscription():
 def start_subscription_thread():
     t = threading.Thread(target=_ensure_subscription, daemon=True)
     t.start()
+
+# --- Manual import routes ---
+
+@bp.get('/strava/activities')
+def strava_list_activities():
+    if not _check_auth():
+        return jsonify({'error': 'unauthorized'}), 401
+
+    date_str = request.args.get('date')
+    if not date_str:
+        return jsonify({'error': 'missing date parameter'}), 400
+    try:
+        datetime.strptime(date_str, '%Y-%m-%d')
+    except ValueError:
+        return jsonify({'error': 'invalid date format, use YYYY-MM-DD'}), 400
+
+    activities = _fetch_activities_for_date(date_str)
+
+    global _cache
+    _cache = {}
+    entries = []
+    for a in activities:
+        npid = _make_npid()
+        while npid in _cache:
+            npid = _make_npid()
+        _cache[npid] = {'id': a.id}
+        entries.append((npid, a))
+
+    if _wants_markdown():
+        lines = []
+        for npid, a in entries:
+            time_str = _to_local(a.start_date).strftime('%H:%M')
+            dist = f'{float(a.distance) / 1000:.1f} km' if a.distance else 'unknown distance'
+            lines.append(f'- **{a.name}** ({npid}) at {time_str} — {dist}')
+        body = '\n'.join(lines) + '\n' if lines else '(no activities)\n'
+        return body, 200, {'Content-Type': 'text/markdown'}
+
+    return jsonify([_activity_to_dict(npid, a) for npid, a in entries]), 200
+
+@bp.post('/strava/import')
+def strava_import_activity():
+    if not _check_auth():
+        return jsonify({'error': 'unauthorized'}), 401
+
+    body = request.get_json(force=True)
+    activity_id = body.get('id')
+    if not activity_id:
+        return jsonify({'error': 'missing id'}), 400
+
+    if re.match(r'^[a-z]{4}$', str(activity_id)):
+        cached = _cache.get(str(activity_id))
+        if not cached:
+            return jsonify({'error': 'npid not found in cache'}), 404
+        native_id = cached['id']
+    else:
+        try:
+            native_id = int(activity_id)
+        except (ValueError, TypeError):
+            return jsonify({'error': 'invalid activity id'}), 400
+
+    client = Client(access_token=_get_access_token())
+    activity = client.get_activity(native_id)
+    record_activity(activity)
+    return jsonify({'status': 'imported', 'title': activity.name}), 200
 
 # --- Auth routes ---
 
