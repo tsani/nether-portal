@@ -8,6 +8,8 @@ import string
 import subprocess
 import threading
 import time
+import polyline as _polyline
+import urllib.parse
 from datetime import datetime, timedelta, timezone
 import sys
 
@@ -36,6 +38,7 @@ STRAVA_API_BASE = 'https://www.strava.com/api/v3'
 
 NP_USERNAME = os.environ.get('NP_USERNAME')
 NP_PASSWORD = os.environ.get('NP_PASSWORD')
+MAPBOX_TOKEN = os.environ.get('MAPBOX_TOKEN')
 
 _cache: dict[str, dict] = {}  # npid -> {'id': int}
 
@@ -152,16 +155,70 @@ def _format_activity(a) -> str:
         f'average_speed_kmh: {avg_speed_kmh:.1f}',
         f'max_speed_kmh: {max_speed_kmh:.1f}',
         f'personal_record_count: {a.pr_count}',
-        '---',
     ]
 
-    if a.description:
-        lines += ['', a.description]
+    lines.append(f'daily_note: "[[{date_str}]]"')
 
-    return '\n'.join(lines) + '\n'
+    png_name = _activity_filename(a).replace('.md', '.png')
+
+    if a.map:
+        poly = a.map.polyline or a.map.summary_polyline
+        if poly:
+            lines.append(f'cover: "[[{png_name}]]"')
+            lines.append(f"polyline: '{poly}'")
+
+    lines.append('---')
+
+    body_lines = [f'![[{png_name}]]']
+
+    if a.description:
+        body_lines += ['', a.description]
+
+    return '\n'.join(lines) + '\n' + '\n'.join(body_lines) + '\n'
 
 def _activity_filename(a) -> str:
     return f'{_to_local(a.start_date).strftime("%Y-%m-%d")} - {a.name}.md'
+
+def _render_route_image(a, note_path: str) -> str | None:
+    """Render the activity polyline as a static map PNG via Mapbox.
+
+    Returns the PNG path if written, None if skipped (no polyline or no token).
+    """
+    if not MAPBOX_TOKEN:
+        return None
+    poly = a.map.polyline or a.map.summary_polyline if a.map else None
+    if not poly:
+        return None
+
+    png_path = note_path[:-3] + '.png'
+
+    # Mapbox has an 8192-char URL limit; downsample until it fits.
+    coords = _polyline.decode(poly, precision=5)
+    stride = 1
+    while True:
+        encoded = _polyline.encode(coords[::stride], precision=5)
+        url_poly = urllib.parse.quote(encoded, safe='')
+        overlay = f'path-4+fc4c02-1({url_poly})'
+        url = (
+            f'https://api.mapbox.com/styles/v1/mapbox/outdoors-v12/static/'
+            f'{overlay}/auto/1280x800@2x'
+            f'?padding=50&access_token={MAPBOX_TOKEN}'
+        )
+        if len(url) <= 8192 or stride > 16:
+            break
+        stride *= 2
+
+    try:
+        r = requests.get(url, timeout=30)
+        r.raise_for_status()
+        with open(png_path, 'wb') as f:
+            f.write(r.content)
+        logging.info('strava: wrote route image %s', os.path.basename(png_path))
+        return png_path
+    except Exception as e:
+        logging.warning('strava: failed to render route image: %s', e)
+        return None
+
 
 def record_activity(a):
     filename = _activity_filename(a)
@@ -176,7 +233,13 @@ def record_activity(a):
     with open(path, 'w') as f:
         f.write(_format_activity(a))
 
-    subprocess.run(['git', '-C', OBSIDIAN_ACTIVITY_DIR, 'add', filename], check=True)
+    png_path = _render_route_image(a, path)
+
+    files_to_add = [filename]
+    if png_path:
+        files_to_add.append(os.path.basename(png_path))
+
+    subprocess.run(['git', '-C', OBSIDIAN_ACTIVITY_DIR, 'add'] + files_to_add, check=True)
     subprocess.run(
         ['git', '-C', OBSIDIAN_ACTIVITY_DIR, 'commit', '-m', f'strava: {a.name}'],
         check=True,

@@ -11,16 +11,23 @@ Required env vars (same as nether_portal/strava.py):
 Optional:
   STRAVA_DELAY_SEC    seconds to sleep between detailed-activity fetches (default: 0.5)
                       Strava allows 200 req/15 min, so 0.5 s gives comfortable headroom.
+
+Flags:
+  -f                  force overwrite of existing notes (default: skip)
 """
 
+import argparse
 import json
 import logging
 import os
 import subprocess
 import sys
 import time
+import polyline as _polyline
+import urllib.parse
 from datetime import datetime, timezone
 
+import requests
 from stravalib import Client
 
 logging.basicConfig(level=logging.INFO, format='%(levelname)s %(message)s')
@@ -38,6 +45,7 @@ OBSIDIAN_ACTIVITY_DIR = os.path.join(
 )
 
 DELAY_SEC = float(os.environ.get('STRAVA_DELAY_SEC', '0.5'))
+MAPBOX_TOKEN = os.environ.get('MAPBOX_TOKEN')
 
 if not os.path.exists(OBSIDIAN_ACTIVITY_DIR):
     logging.error('does not exist: %s', OBSIDIAN_ACTIVITY_DIR)
@@ -106,13 +114,67 @@ def _format_activity(a) -> str:
         f'average_speed_kmh: {avg_speed_kmh:.1f}',
         f'max_speed_kmh: {max_speed_kmh:.1f}',
         f'personal_record_count: {a.pr_count}',
-        '---',
     ]
 
-    if a.description:
-        lines += ['', a.description]
+    lines.append(f'daily_note: "[[{date_str}]]"')
 
-    return '\n'.join(lines) + '\n'
+    png_name = _activity_filename(a).replace('.md', '.png')
+
+    if a.map:
+        poly = a.map.polyline or a.map.summary_polyline
+        if poly:
+            lines.append(f'cover: "[[{png_name}]]"')
+            lines.append(f"polyline: '{poly}'")
+
+    lines.append('---')
+
+    body_lines = [f'![[{png_name}]]']
+
+    if a.description:
+        body_lines += ['', a.description]
+
+    return '\n'.join(lines) + '\n' + '\n'.join(body_lines) + '\n'
+
+
+def _render_route_image(a, note_path: str) -> str | None:
+    """Render the activity polyline as a static map PNG via Mapbox.
+
+    Returns the PNG path if written, None if skipped (no polyline or no token).
+    """
+    if not MAPBOX_TOKEN:
+        return None
+    poly = a.map.polyline or a.map.summary_polyline if a.map else None
+    if not poly:
+        return None
+
+    png_path = note_path[:-3] + '.png'
+
+    # Mapbox has an 8192-char URL limit; downsample until it fits.
+    coords = _polyline.decode(poly, precision=5)
+    stride = 1
+    while True:
+        encoded = _polyline.encode(coords[::stride], precision=5)
+        url_poly = urllib.parse.quote(encoded, safe='')
+        overlay = f'path-4+fc4c02-1({url_poly})'
+        url = (
+            f'https://api.mapbox.com/styles/v1/mapbox/outdoors-v12/static/'
+            f'{overlay}/auto/1280x800@2x'
+            f'?padding=50&access_token={MAPBOX_TOKEN}'
+        )
+        if len(url) <= 8192 or stride > 16:
+            break
+        stride *= 2
+
+    try:
+        r = requests.get(url, timeout=30)
+        r.raise_for_status()
+        with open(png_path, 'wb') as f:
+            f.write(r.content)
+        logging.info('wrote route image %s', os.path.basename(png_path))
+        return png_path
+    except Exception as e:
+        logging.warning('failed to render route image: %s', e)
+        return None
 
 def _activity_filename(a) -> str:
     return f'{_to_local(a.start_date).strftime("%Y-%m-%d")} - {a.name}.md'
@@ -120,6 +182,10 @@ def _activity_filename(a) -> str:
 # --- Main import logic ---
 
 def main():
+    parser = argparse.ArgumentParser(description='Bulk-import Strava activities into Obsidian.')
+    parser.add_argument('-f', '--force', action='store_true', help='overwrite existing notes')
+    args = parser.parse_args()
+
     client = Client(access_token=_get_access_token())
 
     logging.info('fetching activity list from Strava...')
@@ -133,18 +199,19 @@ def main():
     )
 
     imported = []
+    imported_pngs = []
     skipped = 0
 
     for i, summary in enumerate(summaries, 1):
         filename = _activity_filename(summary)
         path = os.path.join(OBSIDIAN_ACTIVITY_DIR, filename)
 
-        if os.path.exists(path):
+        if os.path.exists(path) and not args.force:
             logging.info('[%d/%d] skip (exists): %s', i, len(summaries), filename)
             skipped += 1
             continue
 
-        # Fetch detailed activity for description and precise fields
+        # Fetch detailed activity for description, precise fields, and full polyline
         logging.info('[%d/%d] importing: %s', i, len(summaries), filename)
         activity = client.get_activity(summary.id)
 
@@ -152,6 +219,10 @@ def main():
             f.write(_format_activity(activity))
 
         imported.append(path)
+
+        png_path = _render_route_image(activity, path)
+        if png_path:
+            imported_pngs.append(png_path)
 
         if DELAY_SEC > 0:
             time.sleep(DELAY_SEC)
@@ -164,8 +235,9 @@ def main():
 
     # Stage all new files in one go
     rel_paths = [os.path.relpath(p, OBSIDIAN_VAULT_PATH) for p in imported]
+    rel_png_paths = [os.path.relpath(p, OBSIDIAN_VAULT_PATH) for p in imported_pngs]
     subprocess.run(
-        ['git', '-C', OBSIDIAN_VAULT_PATH, 'add'] + rel_paths,
+        ['git', '-C', OBSIDIAN_VAULT_PATH, 'add'] + rel_paths + rel_png_paths,
         check=True,
     )
     subprocess.run(
