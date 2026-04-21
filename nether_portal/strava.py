@@ -257,8 +257,8 @@ def _ensure_subscription():
     )
     resp.raise_for_status()
     existing = resp.json()
-
-    if existing:
+    callback_url = f"{os.environ['BASE_URL']}/strava-webhook"
+    if any(r['callback_url'] == callback_url for r in existing):
         logging.info('strava: webhook subscription already exists (id=%s)', existing[0]['id'])
         return
 
@@ -267,7 +267,7 @@ def _ensure_subscription():
         data={
             'client_id': STRAVA_CLIENT_ID,
             'client_secret': STRAVA_CLIENT_SECRET,
-            'callback_url': f"{os.environ['BASE_URL']}/strava-webhook",
+            'callback_url': callback_url,
             'verify_token': STRAVA_VERIFY_TOKEN,
         },
     )

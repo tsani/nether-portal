@@ -1,5 +1,8 @@
 import subprocess
 import os
+import logging
+
+logging.basicConfig(level=logging.INFO, format='%(levelname)s %(message)s')
 
 from flask import Flask
 
