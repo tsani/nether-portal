@@ -262,6 +262,15 @@ def _ensure_subscription():
         logging.info('strava: webhook subscription already exists (id=%s)', existing[0]['id'])
         return
 
+    # Delete stale subscriptions whose callback_url doesn't match.
+    for sub in existing:
+        logging.info('strava: deleting stale subscription id=%s (callback_url=%s)', sub['id'], sub['callback_url'])
+        del_resp = requests.delete(
+            f"{STRAVA_API_BASE}/push_subscriptions/{sub['id']}",
+            params={'client_id': STRAVA_CLIENT_ID, 'client_secret': STRAVA_CLIENT_SECRET},
+        )
+        del_resp.raise_for_status()
+
     resp = requests.post(
         f'{STRAVA_API_BASE}/push_subscriptions',
         data={
