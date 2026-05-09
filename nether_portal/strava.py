@@ -358,6 +358,7 @@ def strava_auth():
     client = Client()
     url = client.authorization_url(
         client_id=STRAVA_CLIENT_ID,
+        scope=['activity:read_all'],
         redirect_uri=f"{os.environ['BASE_URL']}/strava-authorization",
     )
     return redirect(url)
